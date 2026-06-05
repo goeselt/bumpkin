@@ -1,0 +1,337 @@
+'use strict'
+
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const { buildComment, MARKER } = require('./comment.js')
+
+function makeCommit(sha, message, bumpLevel, valid = true) {
+  return { sha, message, result: { valid, bumpLevel, errors: [] } }
+}
+
+// --- marker always present -------------------------------------------------------------------------------------------
+
+test('MARKER is always present in output', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add login',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes(MARKER), 'MARKER missing from comment')
+})
+
+// --- invalid title ---------------------------------------------------------------------------------------------------
+
+test('invalid title: heading and format hint present', () => {
+  const body = buildComment({
+    titleResult: { valid: false, bumpLevel: null, errors: ['unknown type "wip"'] },
+    title: 'WIP: do stuff',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('[!CAUTION]'), 'caution alert missing')
+  assert.ok(body.includes('Invalid PR Title'), 'heading missing')
+  assert.ok(body.includes('WIP: do stuff'), 'input title missing')
+  assert.ok(body.includes('How to fix'), 'fix hint missing')
+})
+
+test('invalid title: empty string handled gracefully', () => {
+  const body = buildComment({
+    titleResult: { valid: false, bumpLevel: null, errors: ['PR title is empty'] },
+    title: '',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('(empty)'), 'empty placeholder missing')
+})
+
+test('invalid title: alias suggestion is shown as the concrete fix', () => {
+  const body = buildComment({
+    titleResult: {
+      valid: false,
+      bumpLevel: null,
+      errors: ['type "feature" is not recognized by downstream release tools; use "feat"'],
+      suggestion: 'feat: add login',
+    },
+    title: 'feature: add login',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('Rename the PR title to'), 'rename hint missing')
+  assert.ok(body.includes('`feat: add login`'), 'concrete suggestion missing')
+})
+
+// --- bump conflict ---------------------------------------------------------------------------------------------------
+
+test('conflict: heading, both bump levels, and fix options present', () => {
+  const commits = [
+    makeCommit('abc1234567', 'feat!: remove old endpoint', 'major'),
+    makeCommit('def5678901', 'fix: minor correction', 'patch'),
+  ]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: minor correction',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  assert.ok(body.includes('[!CAUTION]'), 'caution alert missing')
+  assert.ok(body.includes('Bump Conflict'), 'heading missing')
+  assert.ok(body.includes('major'), 'major bump level missing')
+  assert.ok(body.includes('patch'), 'title bump level missing')
+  assert.ok(body.includes('Option A'), 'Option A missing')
+  assert.ok(body.includes('Option B'), 'Option B missing')
+})
+
+test('conflict: conflicting commit flagged with warning in table', () => {
+  const commits = [
+    makeCommit('abc1234567', 'fix!: break API', 'major'),
+    makeCommit('def5678901', 'chore: cleanup', 'none'),
+  ]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: patch release',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  assert.ok(body.includes(':warning:'), 'warning icon missing for conflicting commit')
+  assert.ok(body.includes('abc1234'), 'conflicting SHA missing')
+})
+
+test('conflict: non-conflicting commit shows dash not warning', () => {
+  const commits = [makeCommit('abc1234567', 'fix!: break', 'major'), makeCommit('def5678901', 'chore: cleanup', 'none')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: release',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  // 'none' bump should show '--', not a warning
+  assert.ok(body.includes('--'), 'dash missing for non-bump commit')
+})
+
+// --- success ---------------------------------------------------------------------------------------------------------
+
+test('success: minor bump shows correct heading and reason', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add login',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('[!TIP]'), 'tip alert missing')
+  assert.ok(body.includes('minor'), 'bump level missing')
+  assert.ok(body.includes('feat'), 'type reason missing')
+})
+
+test('success: none bump uses "No Release" heading', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'none', errors: [] },
+    title: 'chore: update deps',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('No Release'), 'No Release heading missing')
+  assert.ok(body.includes('[!NOTE]'), 'note alert missing for no-release')
+})
+
+test('alert: commit table renders outside the blockquote (tables do not render inside)', () => {
+  const commits = [makeCommit('abc1234567', 'feat!: break', 'major')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: release',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  // <details> must start at line beginning, never blockquote-prefixed.
+  assert.ok(body.includes('\n<details>'), 'details block not at line start')
+  assert.ok(!body.includes('> <details>'), 'details block wrongly inside blockquote')
+})
+
+test('success: commit table present when commits provided', () => {
+  const commits = [
+    makeCommit('abc1234567', 'feat: add feature', 'minor'),
+    makeCommit('def5678901', 'chore: cleanup', 'none'),
+  ]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add feature',
+    commitAnalysis: commits,
+    maxCommitBump: 'minor',
+  })
+  assert.ok(body.includes('<details>'), 'details section missing')
+  assert.ok(body.includes('abc1234'), 'commit SHA missing')
+  assert.ok(body.includes('2 commits analyzed'), 'commit count missing')
+})
+
+test('success: no details section when no commits provided', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: correct bug',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(!body.includes('<details>'), 'unexpected details section')
+})
+
+// --- commit table ----------------------------------------------------------------------------------------------------
+
+test('non-CC commit shows dash in table', () => {
+  const commits = [makeCommit('abc1234567', 'Update README', 'none', false)]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add feature',
+    commitAnalysis: commits,
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('--'), 'dash missing for non-CC commit')
+  assert.ok(!body.includes(':warning:'), 'unexpected warning for non-CC commit')
+})
+
+test('long subject truncated to 72 chars in table', () => {
+  const longSubject = `feat: ${'x'.repeat(100)}`
+  const commits = [makeCommit('abc1234567', longSubject, 'minor')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add feature',
+    commitAnalysis: commits,
+    maxCommitBump: 'minor',
+  })
+  // Subject in table must be truncated (not the full 100 x's)
+  assert.ok(!body.includes('x'.repeat(100)), 'subject not truncated')
+  assert.ok(body.includes('...'), 'truncation indicator missing')
+})
+
+// --- Markdown sanitization -------------------------------------------------------------------------------------------
+
+test('S01: backtick in title cannot break out of the inline-code span', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add `inline` code',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  // The raw backtick from the title must be neutralized (replaced with ').
+  assert.ok(!body.includes('`feat: add `inline` code`'), 'backtick broke the span')
+  assert.ok(body.includes("feat: add 'inline' code"), 'sanitized form missing')
+})
+
+test('S02: pipe in commit subject is escaped inside table cell', () => {
+  const commits = [makeCommit('abc1234567', 'feat: a | b', 'minor')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add feature',
+    commitAnalysis: commits,
+    maxCommitBump: 'minor',
+  })
+  assert.ok(body.includes('feat: a \\| b'), 'pipe not escaped in table cell')
+})
+
+test('S03: @mentions and #refs in title are wrapped in code (no notifications)', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: ping @everyone closes #1',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  // Must appear only inside a backtick-wrapped span, never as bare text.
+  assert.ok(body.includes('`feat: ping @everyone closes #1`'), 'mention not code-wrapped')
+})
+
+test('S04: newlines in title are collapsed to a single line', () => {
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: line one\nmalicious second line',
+    commitAnalysis: [],
+    maxCommitBump: 'none',
+  })
+  assert.ok(body.includes('`feat: line one malicious second line`'), 'newline not collapsed')
+})
+
+test('S05: bump cell enum values are never affected by sanitization', () => {
+  const commits = [makeCommit('abc1234567', 'feat!: break', 'major')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: release',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  assert.ok(body.includes('**`major`** :warning:'), 'conflict bump cell missing')
+})
+
+// --- Review fix: hidden breaking footer (non-CC subject) -------------------------------------------------------------
+
+test('F2-01: non-CC commit with breaking footer is flagged in the table', () => {
+  // bumpLevel major but subject not valid CC -- must still show the bump + warning.
+  const commits = [makeCommit('abc1234567', 'WIP: stuff', 'major', false)]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: release',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  assert.ok(body.includes('**`major`** :warning:'), 'offending commit not flagged')
+  assert.ok(body.includes('abc1234'), 'offending SHA missing')
+  assert.ok(!body.match(/\| `abc1234` \|[^|]*\| -- \|/), 'offending commit shown as dash')
+})
+
+// --- Review fix: fix-suggestion matches the required bump ------------------------------------------------------------
+
+test('F3-01: patch conflict suggests fix:, not feat:', () => {
+  const commits = [makeCommit('abc1234567', 'fix: small bug', 'patch')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'none', errors: [] },
+    title: 'chore: cleanup',
+    commitAnalysis: commits,
+    maxCommitBump: 'patch',
+  })
+  assert.ok(body.includes('`fix: cleanup`'), 'patch suggestion should use fix:')
+  assert.ok(!body.includes('`feat: cleanup`'), 'must not over-bump to feat:')
+})
+
+test('F3-02: minor conflict suggests feat:', () => {
+  const commits = [makeCommit('abc1234567', 'feat: new thing', 'minor')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: correct bug',
+    commitAnalysis: commits,
+    maxCommitBump: 'minor',
+  })
+  assert.ok(body.includes('`feat: correct bug`'), 'minor suggestion should use feat:')
+  assert.ok(!body.includes('feat!:'), 'must not suggest breaking')
+})
+
+test('F3-03: major conflict suggests feat!:', () => {
+  const commits = [makeCommit('abc1234567', 'feat!: break', 'major')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add thing',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  assert.ok(body.includes('`feat!: add thing`'), 'major suggestion should use feat!:')
+})
+
+// --- Review fix: Option B wording matches conflict kind --------------------------------------------------------------
+
+test('F4-01: non-breaking conflict tells user to lower the commit type', () => {
+  const commits = [makeCommit('abc1234567', 'feat: new thing', 'minor')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'patch', errors: [] },
+    title: 'fix: correct bug',
+    commitAnalysis: commits,
+    maxCommitBump: 'minor',
+  })
+  assert.ok(body.includes('lower their type'), 'non-breaking Option B wording missing')
+  assert.ok(!body.includes('breaking-change indicator'), 'must not mention breaking indicator')
+})
+
+test('F4-02: breaking conflict tells user to remove the breaking indicator', () => {
+  const commits = [makeCommit('abc1234567', 'feat!: break', 'major')]
+  const body = buildComment({
+    titleResult: { valid: true, bumpLevel: 'minor', errors: [] },
+    title: 'feat: add thing',
+    commitAnalysis: commits,
+    maxCommitBump: 'major',
+  })
+  assert.ok(body.includes('breaking-change indicator'), 'breaking Option B wording missing')
+})

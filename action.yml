@@ -1,0 +1,56 @@
+---
+name: 'Bumpkin'
+description: 'GitHub Action that validates PR release intent and resolves the next semantic version from Conventional Commit history.'
+author: 'goeselt'
+
+inputs:
+  github-token:
+    description: 'GitHub token used to list PR commits and post the PR comment.'
+    required: false
+    default: ${{ github.token }}
+  pr-comment:
+    description: 'Whether to create or update the explanatory PR comment on pull_request events.'
+    required: false
+    default: 'true'
+  release-scope:
+    description: 'Tag namespace for scoped releases. Tags become <scope>/<prefix><version>.'
+    required: false
+    default: ''
+  tag-prefix:
+    description: 'Prefix for version tags, for example v for v1.2.3.'
+    required: false
+    default: 'v'
+  initial-version:
+    description: 'Version used when no matching release tag exists.'
+    required: false
+    default: '0.0.0'
+  release-paths:
+    description: 'Optional newline-separated paths that are allowed to contribute to push-mode version resolution.'
+    required: false
+    default: ''
+  release-ignore-paths:
+    description: 'Optional newline-separated paths that are ignored during push-mode version resolution.'
+    required: false
+    default: ''
+
+outputs:
+  release-needed:
+    description: 'Whether the PR title or commit history requires a release.'
+  bump-level:
+    description: 'Semantic version bump level: major, minor, patch, or none.'
+  current-version:
+    description: 'Current semantic version without tag prefix.'
+  next-version:
+    description: 'Next semantic version without tag prefix.'
+  previous-tag:
+    description: 'Latest matching release tag, if one exists.'
+  release-tag:
+    description: 'Full release tag, for example v1.2.3 or my-tool/v1.2.3.'
+  major-tag:
+    description: 'Floating major tag, for example v1 or my-tool/v1.'
+  minor-tag:
+    description: 'Floating minor tag, for example v1.2 or my-tool/v1.2.'
+
+runs:
+  using: node20
+  main: index.js

@@ -1,0 +1,180 @@
+'use strict'
+
+const { bumpGt, firstLine } = require('./version.js')
+
+// Stable HTML-comment marker used to locate and overwrite the single bot comment.
+const MARKER = '<!-- bumpkin -->'
+
+const BUMP_REASON = {
+  major: 'breaking change (`!` indicator or `BREAKING CHANGE` footer)',
+  minor: '`feat` introduces new functionality',
+  patch: '`fix` or `perf` corrects existing behaviour',
+  none: 'no releasable change (`chore`, `docs`, `ci`, ...)',
+}
+
+// --- Markdown sanitization -------------------------------------------------------------------------------------------
+// User-controlled strings (PR title, commit subjects) are always rendered inside an inline-code span.
+// That neutralizes @mentions and #refs (no stray notifications) and most Markdown.
+// Two characters still need handling:
+//   - backtick: would close the code span early
+//   - pipe:     breaks table-cell layout (escaped per GFM, only inside cells)
+
+/** Collapses whitespace and removes backticks; never wraps. */
+function clean(str) {
+  return String(str ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/`/g, "'")
+    .trim()
+}
+
+/** Inline-code span for prose. */
+function code(str) {
+  return `\`${clean(str)}\``
+}
+
+/** Inline-code span for a table cell: also escapes pipes (GFM unescapes them). */
+function cell(str, maxLen) {
+  let text = clean(str)
+  if (maxLen && text.length > maxLen) {
+    text = `${text.slice(0, maxLen - 1)}...`
+  }
+  return `\`${text.replace(/\|/g, '\\|')}\``
+}
+
+function shortSha(sha) {
+  return String(sha ?? '').slice(0, 7)
+}
+
+function bumpCell(bumpLevel, isConflict) {
+  if (!bumpLevel || bumpLevel === 'none') return '--'
+  // bumpLevel is from a fixed enum, safe to interpolate without sanitizing.
+  return isConflict ? `**\`${bumpLevel}\`** :warning:` : `\`${bumpLevel}\``
+}
+
+function commitsTable(commitAnalysis, titleBump) {
+  const rows = commitAnalysis.map(({ sha, message, result }) => {
+    const subject = firstLine(message)
+    const bump = result.bumpLevel ?? 'none'
+    // A commit contributes a bump even when its subject is not valid CC -- e.g. a non-CC subject carrying a
+    // BREAKING CHANGE footer. Display and conflict marking therefore key off the bump level, not the validity flag.
+    const isConflict = bumpGt(bump, titleBump)
+    return `| \`${shortSha(sha)}\` | ${cell(subject, 72)} | ${bumpCell(bump, isConflict)} |`
+  })
+
+  return ['| SHA | Subject | Bump |', '| :-- | :------ | :--: |', ...rows].join('\n')
+}
+
+function detailsSection(commitAnalysis, titleBump) {
+  if (commitAnalysis.length === 0) return ''
+  const n = commitAnalysis.length
+  return [
+    '',
+    '<details>',
+    `<summary>${n} commit${n === 1 ? '' : 's'} analyzed</summary>`,
+    '',
+    commitsTable(commitAnalysis, titleBump),
+    '',
+    '</details>',
+  ].join('\n')
+}
+
+// --- Comment variants ------------------------------------------------------------------------------------------------
+
+// GitHub Markdown alert. A failing check uses CAUTION (red) so it is hard to miss.
+// Content lines are blockquote-prefixed; an empty string becomes a quoted blank line.
+function alert(type, contentLines) {
+  const body = contentLines.map((line) => (line === '' ? '>' : `> ${line}`))
+  return [`> [!${type}]`, ...body].join('\n')
+}
+
+function buildInvalidTitleComment(title, suggestion) {
+  const fixLine = suggestion
+    ? `**How to fix:** Rename the PR title to ${code(suggestion)}`
+    : '**How to fix:** Update the PR title -- for example: `feat: add login` or `fix(auth)!: remove deprecated endpoint`'
+
+  return [
+    MARKER,
+    '',
+    alert('CAUTION', [
+      '**Bumpkin -- Invalid PR Title**',
+      '',
+      'The PR title does not follow [Conventional Commits v1.0.0](https://www.conventionalcommits.org/) format.',
+      '',
+      `**Got:** ${code(title || '(empty)')}`,
+      '**Expected:** `<type>[scope][!]: <description>`',
+      '',
+      '**Allowed types:** `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`',
+      '',
+      fixLine,
+    ]),
+  ].join('\n')
+}
+
+// Example title prefix that yields each bump level, used in the fix suggestion.
+const EXAMPLE_PREFIX = { major: 'feat!', minor: 'feat', patch: 'fix' }
+
+function buildConflictComment(title, titleBump, maxCommitBump, commitAnalysis) {
+  const desc = firstLine(title).replace(/^[a-z]+(\([^)]+\))?!?: /i, '') || 'description'
+  const prefix = EXAMPLE_PREFIX[maxCommitBump] ?? 'feat'
+  const example = code(`${prefix}: ${desc}`)
+
+  // The remedy for a commit differs by what makes it bump high: a breaking indicator can be removed;
+  // an over-strong type must be lowered.
+  const optionB =
+    maxCommitBump === 'major'
+      ? '- **Option B -- Amend the commit(s)** marked :warning: to remove the breaking-change indicator (`!` or `BREAKING CHANGE` footer).'
+      : '- **Option B -- Amend the commit(s)** marked :warning: to lower their type (e.g. `feat:` --> `fix:`) so they no longer imply a higher bump.'
+
+  return [
+    MARKER,
+    '',
+    alert('CAUTION', [
+      '**Bumpkin -- Bump Conflict**',
+      '',
+      `Commits in this PR require a **\`${maxCommitBump}\`** bump, but the PR title ${code(title)} only signals **\`${titleBump}\`**.`,
+      '',
+      '**How to fix -- choose one:**',
+      `- **Option A -- Update the PR title** to reflect the highest bump, e.g. ${example}`,
+      optionB,
+    ]),
+    detailsSection(commitAnalysis, titleBump),
+  ].join('\n')
+}
+
+function buildSuccessComment(title, titleBump, commitAnalysis) {
+  const isRelease = titleBump !== 'none'
+  const heading = isRelease ? `**Bumpkin -- \`${titleBump}\` bump**` : '**Bumpkin -- No Release**'
+
+  return [
+    MARKER,
+    '',
+    alert(isRelease ? 'TIP' : 'NOTE', [
+      heading,
+      '',
+      `The PR title ${code(title)} sets the intended release to a **\`${titleBump}\`** bump.`,
+      '',
+      `**Why:** ${BUMP_REASON[titleBump]}.`,
+    ]),
+    detailsSection(commitAnalysis, titleBump),
+  ].join('\n')
+}
+
+/**
+ * Builds the full PR comment body from scratch. The result fully replaces any previous comment body -- no merging,
+ * so there are no stale intermediate states.
+ *
+ * @param {{ titleResult, title, commitAnalysis, maxCommitBump }} params
+ * @returns {string}
+ */
+function buildComment({ titleResult, title, commitAnalysis, maxCommitBump }) {
+  if (!titleResult.valid) {
+    return buildInvalidTitleComment(title, titleResult.suggestion)
+  }
+  const titleBump = titleResult.bumpLevel
+  if (bumpGt(maxCommitBump, titleBump)) {
+    return buildConflictComment(title, titleBump, maxCommitBump, commitAnalysis)
+  }
+  return buildSuccessComment(title, titleBump, commitAnalysis)
+}
+
+module.exports = { buildComment, MARKER }
