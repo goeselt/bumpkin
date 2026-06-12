@@ -26,7 +26,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Validate PR Title
-        uses: goeselt/bumpkin@32ef90e2e8034fcd9b0dc33e3559424c5220841d # v1.0.0
+        uses: goeselt/bumpkin@88675e84d90b4b33f16e366a508a2525f37f7d6e # v1.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
